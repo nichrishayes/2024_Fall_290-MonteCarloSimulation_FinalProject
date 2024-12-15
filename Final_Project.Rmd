@@ -1,0 +1,1307 @@
+---
+title: "Asthma_Analysis"
+author: "Nicholas Christopher-Hayes"
+date: "2024_12"
+output:
+  html_document:
+    df_print: paged
+urlcolor: blue
+---
+
+
+
+####################################################################################################################
+
+# Links
+https://github.com/barzilab1/ABCD_asthma_inflammation_k
+https://nda.nih.gov/abcd/abcd-annual-releases.html
+https://data-dict.abcdstudy.org/?
+https://data.library.virginia.edu/understanding-ordered-factors-in-a-linear-model/
+https://abcdworkshop.github.io/resources/
+https://wiki.abcdstudy.org/release-notes/start-page.html#significant-changes-for-5.0
+
+# Setup
+
+## Packages
+```{r message = F, include = F}
+# The following code checks whether the packages needed for today are already installed, if not, they will be installed.
+
+## Minimal Install
+suppressPackageStartupMessages({
+  my_packages = c(
+    "utils", "plyr", "tidyr", "dplyr", "stringr", "rlang", "broom", "purrr", "utf8", "devtools", "tidyverse", "knitr", #data management
+    "data.table", "combinat", "stringi",
+    "foreach", "doParallel"
+    )
+  install.packages(setdiff(my_packages, installed.packages()), repos = "http://cran.us.r-project.org")
+  lapply(my_packages, require, character.only = TRUE)
+})
+
+# output all versioning for the current R session
+#sessionInfo()
+```
+
+
+
+## Directory
+```{r message = F, include = F}
+data_root_dir = '/home/nichrishayes/Fall2024/Stats290/Final_Project'
+```
+
+
+# Data Loading/Cleaning {.unlisted .unnumbered .hidden}
+## Workspace
+```{r message = F, echo = F, include = F}
+save.image(file.path(data_root_dir, "Final_Project.RData"))
+load(file.path(data_root_dir, "Final_Project.RData"))
+```
+
+
+
+## Complete Load
+```{r message = F, include = F}
+extractorRData <- function(file, obj_list) {
+      #' Function for extracting an object from a .RData file created by R's save() command
+      #' Inputs: RData file, object name
+      E <- new.env()
+      load(file=file, envir=E)
+      objs = mget(obj_list, envir=E, inherits=F)
+      return(objs)
+}
+all_data = extractorRData(file.path(data_root_dir, "all_data_cleaned.Rdata"), 
+               c("all_data"))
+all_data = all_data$all_data
+meta_var_names = c("subID", "subIDN","eventnameF", "eventnameF", "sesID", "interview_date", "site_id_l")
+```
+
+
+#References
+https://data.library.virginia.edu/getting-started-with-multiple-imputation-in-r/
+https://nerler.github.io/EP16_Multiple_Imputation/practical/05_Working_with_Imputed_Data_in_Different_Formats.html
+https://stats.stackexchange.com/questions/544490/propensity-score-matching-after-imputation-in-r-with-mice
+
+# Notes
+-missing data points would be expected to end up with larger error terms
+-If the missing values are for variables that you consider important based on your understanding of the subject matter
+-the data are missing at random if the probability of being missing is the same only within groups defined by the observed data
+-pay close attention to the variance before/after imputation
+-auxiliary variables (physical trait[sex] vs observed[another cognitive measure])
+-auxiliary variables that are .9+ correlated with response will definitely improve the imputation, but is that realistic? What about common person-level aux variables?
+
+
+# Analysis
+
+## Packages
+
+
+```{r message = F, include = F}
+### Stats
+suppressPackageStartupMessages({
+  my_packages = c(
+    "nlme", "lme4", "lmerTest", "stats", "tidybayes", "performance", "lavaan", "psych", "car", "ggeffects", "marginaleffects",
+    "psych", "Hmisc",
+    "mice", "naniar", "VIM"
+    )
+  utils::install.packages(setdiff(my_packages, installed.packages()), repos = "http://cran.us.r-project.org")
+  lapply(my_packages, require, character.only = TRUE)
+})
+```
+
+
+```{r message = F, include = F}
+### Plotting
+suppressPackageStartupMessages({
+  my_packages = c(
+    "RColorBrewer", "hrbrthemes", "viridis",  # packages for visualization
+    "magrittr", "ggplot2", "ggpubr", "gtools", "ggExtra",
+    "semPlot", "ggeffects", "ggthemes",
+    "cobalt", "cowplot", "grid",
+    "tidybayes", "distributional", "patchwork",
+    "ggrain", "gghalves", "corrplot"
+    )
+  install.packages(setdiff(my_packages, installed.packages()), repos = "http://cran.us.r-project.org")
+  lapply(my_packages, require, character.only = TRUE)
+})
+```
+
+
+
+## Data
+```{r message = F, echo = F, include = F}
+analysis_vars = c("interview_age", "nihtbx_pattern_uncorrected")
+
+set.seed(22)
+analysis_data = all_data %>% 
+  filter(eventnameF %in% c(0)) %>%
+  select(any_of(c(meta_var_names
+                  , analysis_vars
+                  ))) %>% 
+  dplyr::mutate(interview_age = lag(interview_age,n=1)) %>% filter(str_detect(site_id_l, "site")) %>% drop_na(any_of(analysis_vars)) %>%
+  slice_sample(n = 10000)
+  # dplyr::mutate(across(any_of(old_names), ~scale(.x)[,1]))
+
+
+```
+
+## Formula
+```{r message = F, echo = F, include = F}
+model_form = as.formula("nihtbx_pattern_uncorrected ~ 1 + interview_age")
+```
+
+
+## Descriptives
+### Age
+```{r}
+analysis_data %>%
+  ggplot(aes(x=(interview_age/12))) + 
+  geom_histogram(aes(y = ..density..)) +
+  geom_density(col = "#1b98e0", size = 2)+
+  labs(x="Age (yrs)")
+```
+
+### Attention
+```{r}
+analysis_data %>%
+  ggplot(aes(x=nihtbx_pattern_uncorrected)) + 
+  geom_histogram(aes(y = ..density..)) +
+  geom_density(col = "#1b98e0", size = 2)+
+  labs(x="Processing Speed Score")
+
+# shapiro.test(analysis_data$nihtbx_pattern_uncorrected)
+```
+
+### Sex
+```{r}
+all_data %>% filter(eventnameF %in% seq(0,8,2), demo_sexF %in% c(1:2)) %>%
+  dplyr::group_by(sesID, demo_sexF) %>%
+  dplyr::summarise(n = n()) %>%
+  dplyr::mutate(Freq = n / sum(n),
+                Tot = sum(n)) %>%
+  dplyr::ungroup() %>%
+
+  ggplot(aes(x = demo_sexF, y = Freq, label=Tot)) +
+  geom_bar(stat="identity") +
+  geom_text(aes(label=n), vjust=2.5,
+            color="white", size=3.5)+
+  scale_fill_brewer(palette="Paired")+
+  labs(x="Sex") +
+  theme_minimal()+
+  facet_wrap(~sesID, scales = "free")
+```
+
+
+
+
+
+## Check Missingness
+```{r}
+# Check the missing data
+# sapply(model_data, function(x) sum(is.na(x)))
+# sapply(model_data, function(x) mean(is.na(x)) * 100)
+naniar::vis_miss(all_data %>% 
+  filter(eventnameF %in% c(0)) %>%
+  select(any_of(c(meta_var_names
+                  , analysis_vars
+                  ))) %>% 
+  dplyr::mutate(interview_age = lag(interview_age,n=1)) %>% filter(str_detect(site_id_l, "site")) %>% drop_na(interview_age) %>% select(any_of(analysis_vars)))
+VIM::marginplot(all_data %>% 
+  filter(eventnameF %in% c(0)) %>%
+  select(any_of(c(meta_var_names
+                  , analysis_vars
+                  ))) %>% 
+  dplyr::mutate(interview_age = lag(interview_age,n=1)) %>% filter(str_detect(site_id_l, "site")) %>% drop_na(interview_age) %>% select(any_of(analysis_vars)))
+```
+
+## Imputation Function
+```{r}
+imp_fun = function(data, seed, m, keep_vars=NULL){
+  # Impute the dataset
+  # We run the mice code with 0 iterations - Just to get a copy of the predictor matrix
+  predM <- mice(data, maxit=0, seed = seed)
+  # Set vars to 0 that will not be imputed
+  predM$predictorMatrix[, setdiff(colnames(predM$predictorMatrix), c(keep_vars))] <- 0
+  
+  # Run the imputation
+  model_data_imp <- mice(data, m = m, maxit = 1, 
+               predictorMatrix = predM$predictorMatrix, method='pmm', print =  FALSE, seed = seed)
+}
+```
+
+## Outcomes Functions
+### Bias
+```{r}
+abs_bias = function(popP,estP){
+  # sum(abs(estP-popP))/length(estP)
+  mean(abs(estP-popP))
+}
+
+rel_bias = function(popP,estP){
+  mean(abs(estP-popP))/popP
+}
+
+### Standardized Bias
+std_bias = function(popP,estP,stdev){
+  # (sum(abs(estP-popP))/length(estP))/stdev
+  mean(abs(estP-popP))/stdev
+}
+```
+
+### Efficiency
+```{r}
+raw_eff = function(estP){
+  (sum((estP-mean(estP))^2) / (length(estP)-1))
+}
+```
+
+### RMSE
+```{r}
+mse_bias = function(popP,estP){
+  mean((estP-popP)^2)
+}
+
+rmse_bias = function(popP,estP){
+  sqrt(mean((estP-popP)^2))
+}
+```
+
+
+# Population Parameters
+
+## Model N=10K
+```{r}
+model_out = lm(model_form
+               , data=analysis_data)
+model_out_s = summary(model_out)
+model_out_s
+```
+
+## Coefficients N=10K
+```{r}
+popPs = model_out_s$coefficients[2,1:2]
+popPs = c(popPs, var=var(analysis_data$nihtbx_pattern_uncorrected), mean=mean(analysis_data$nihtbx_pattern_uncorrected))
+# popPs[["Estimate"]]
+# popPs[["Std. Error"]]
+```
+
+
+# Scenario Set 1.1: Single Imputation, nMissing=1, nPreds=0
+### CC Summary
+```{r}
+cc_outcome_sum_fun = function(data,pm,pv,pe,e,es){
+  list(
+  # Bias of the Mean
+  Mean_RelBias=rel_bias(popP = pm, estP = mean(data, na.rm=T))
+  # Bias of the Variance
+  , Variance_RelBias = rel_bias(popP = pv, estP = var(data, na.rm=T))
+  # Bias of the parameter
+  , Beta_RelBias = rel_bias(popP = pe, estP = e)
+  , Beta_StdBias = std_bias(popP = pe, estP = e, stdev = es)
+  # Bias + Efficiency
+  , Beta_RMSE = rmse_bias(popP = pe, estP = e)
+  ) %>% as.data.frame()
+}
+```
+## Induce Missingness - 1 missing
+```{r}
+set.seed(23)
+# sample(x=c(1:10000),size=(10000-1),replace = F)
+sub_samp_inds = sample.int(10000,size=1,replace = F)
+model_data <- analysis_data
+model_data[sub_samp_inds,"nihtbx_pattern_uncorrected"] <- NA
+```
+
+## Check Missingness
+```{r}
+# Check the missing data
+# sapply(model_data, function(x) sum(is.na(x)))
+# sapply(model_data, function(x) mean(is.na(x)) * 100)
+naniar::vis_miss(model_data %>% select(any_of(analysis_vars)))
+VIM::marginplot(model_data %>% select(any_of(analysis_vars)))
+```
+
+-Red bottom boxplot shows distribution of age with flanker missing
+-Blue bottom boxplot shows distribution of age with remaining flanker obvs
+
+
+## Impute
+```{r}
+model_data_imp = imp_fun(data = model_data, seed = 24, m = 1, keep_vars = c("nihtbx_pattern_uncorrected"))
+```
+
+
+## Check imputation
+```{r}
+model_data %>% left_join(mice::complete(model_data_imp, 1) %>% rename(nihtbx_pattern_uncorrected_imp = nihtbx_pattern_uncorrected)) %>%
+
+  # Density plots
+  ggplot(aes(x=nihtbx_pattern_uncorrected, fill="Original")) +
+    geom_density(alpha=0.5) +
+    geom_density(aes(x=nihtbx_pattern_uncorrected_imp, fill="Imputed"), alpha=0.5) +
+    labs(title="Density Plot of Processing Speed", x="NIHTB Processing Speed", fill="Original vs. Imputed")
+```
+
+
+## Model
+```{r}
+# Complete-case
+s11_model_out <- lm(nihtbx_pattern_uncorrected ~ 1 + interview_age, data=model_data)
+s11_model_out_s = summary(s11_model_out)
+
+# Fit the same model to each of the imputed datasets and pool the results
+s11_model_out_imp <- with(data=model_data_imp, exp=lm(nihtbx_pattern_uncorrected ~ 1 + interview_age))
+# Pool the results
+s11_model_out_imppool <- pool(s11_model_out_imp)
+s11_model_out_imppool_s = summary(s11_model_out_imppool)
+# format(summary(s11_model_out_imppool, conf.int = TRUE), scientific = F, digits = 3)
+s11_model_out_imppool_s
+```
+
+## Outcomes
+```{r}
+# CC outcomes
+s11_cc_outcomes = cc_outcome_sum_fun(
+  data=model_data %>% select(nihtbx_pattern_uncorrected) %>% as.matrix()
+  , pm =popPs[["mean"]]
+  , pv = popPs[["var"]]
+  , pe = popPs[["Estimate"]]
+  , e = s11_model_out_s$coefficients[2,1:2][["Estimate"]]
+  , es = s11_model_out_s$coefficients[2,1:2][["Std. Error"]]
+)
+s11_cc_outcomes
+
+# MI outcomes
+s11_imp_outcomes = list(
+  # Bias of the Mean
+  Mean_RelBias=rel_bias(popP = popPs[["mean"]], estP = mean(complete(model_data_imp) %>% select(nihtbx_pattern_uncorrected) %>% as.matrix()))
+  # Bias of the Variance
+  , Variance_RelBias = rel_bias(popP = popPs[["var"]], estP = var(complete(model_data_imp) %>% select(nihtbx_pattern_uncorrected) %>% as.matrix()))
+  # Bias of the parameter
+  , Beta_RelBias = rel_bias(popP = popPs[["Estimate"]], estP = s11_model_out_imppool_s$coefficients[2,1:2][["Estimate"]])
+  , Beta_StdBias = std_bias(popP = popPs[["Estimate"]], estP = s11_model_out_imppool_s$coefficients[2,1:2][["Estimate"]], stdev = s11_model_out_imppool_s$coefficients[2,1:2][["Std. Error"]])
+  # Bias + Efficiency
+  , Beta_RMSE = rmse_bias(popP = popPs[["Estimate"]], estP = s11_model_out_imppool_s$coefficients[2,1:2][["Estimate"]])
+  ) %>% as.data.frame()
+s11_imp_outcomes
+```
+
+
+# Scenario Set 1.2: Multiple Imputation, nMissing=1, nPreds=0
+
+## Induce Missingness - 1 missing
+```{r}
+set.seed(25)
+# sample(x=c(1:10000),size=(10000-1),replace = F)
+sub_samp_inds = sample.int(10000,size=1,replace = F)
+model_data <- analysis_data
+model_data[sub_samp_inds,"nihtbx_pattern_uncorrected"] <- NA
+```
+
+## Check Missingness
+```{r}
+# Check the missing data
+# sapply(model_data, function(x) sum(is.na(x)))
+# sapply(model_data, function(x) mean(is.na(x)) * 100)
+naniar::vis_miss(model_data %>% select(any_of(analysis_vars)))
+VIM::marginplot(model_data %>% select(any_of(analysis_vars)))
+```
+
+
+## Impute
+```{r}
+model_data_imp = imp_fun(data = model_data, seed = 26, m = 10, keep_vars = c("nihtbx_pattern_uncorrected"))
+```
+
+
+## Check imputation
+```{r}
+
+# Density plots
+ggplot() +
+  geom_density(data = model_data, aes(x=nihtbx_pattern_uncorrected, fill="Original"), alpha=0.5) +
+  geom_density(data = mice::complete(model_data_imp, action="long", include = TRUE) %>% filter(.imp != 0) %>% rename(nihtbx_pattern_uncorrected_imp = nihtbx_pattern_uncorrected),
+               aes(x=nihtbx_pattern_uncorrected_imp, fill="Imputed"), alpha=0.5) +
+  geom_point(data = mice::complete(model_data_imp, action="long", include = TRUE) %>% filter(.imp != 0) %>% rename(nihtbx_pattern_uncorrected_imp = nihtbx_pattern_uncorrected) %>% group_by(.imp) %>% summarise(nihtbx_pattern_uncorrected_mean = mean(nihtbx_pattern_uncorrected_imp), nihtbx_pattern_uncorrected_var = var(nihtbx_pattern_uncorrected_imp)), aes(x=nihtbx_pattern_uncorrected_mean, y=0, color=as.factor(.imp)), size=5
+             ) +
+  labs(title="Density Plot of Processing Speed", x="NIHTB Processing Speed", fill="Original vs. Imputed", color="Avg. of M#")
+  # theme(
+  #     legend.title = element_blank())
+
+
+
+
+# Histogram of Variance
+mice::complete(model_data_imp, action="long", include = TRUE) %>% filter(.imp != 0) %>% rename(nihtbx_pattern_uncorrected_imp = nihtbx_pattern_uncorrected) %>% group_by(.imp) %>% summarise(nihtbx_pattern_uncorrected_mean = mean(nihtbx_pattern_uncorrected_imp), nihtbx_pattern_uncorrected_var = var(nihtbx_pattern_uncorrected_imp)) %>%
+  ggplot(aes(y=nihtbx_pattern_uncorrected_var, x=as.factor(.imp), color=as.factor(.imp))) + 
+    geom_point(show.legend = F) +#aes(y = ..density..)
+    # geom_density(col = "#1b98e0", size = 2)+
+    labs(title="NIHTB Processing Speed Variance for all MI datasets", x="M#", y="Variance")
+
+
+
+# densityplot(model_data_imp, ~nihtbx_pattern_uncorrected | .imp)
+# densityplot( x=model_data_imp , data= ~ nihtbx_pattern_uncorrected)
+```
+
+
+## Model
+```{r}
+# Complete-case
+s12_model_out <- lm(nihtbx_pattern_uncorrected ~ 1 + interview_age, data=model_data)
+s12_model_out_s = summary(s12_model_out)
+
+# Fit the same model to each of the imputed datasets and pool the results
+s12_model_out_imp <- with(data=model_data_imp, exp=lm(nihtbx_pattern_uncorrected ~ 1 + interview_age))
+
+# Pool the results
+s12_model_out_imppool <- pool(s12_model_out_imp)
+s12_model_out_imppool_s = summary(s12_model_out_imppool)
+# format(summary(model_out_imppool, conf.int = TRUE), scientific = F, digits = 3)
+s12_model_out_imppool_s
+```
+
+## Outcomes
+```{r}
+# CC outcomes
+s12_cc_outcomes = cc_outcome_sum_fun(
+  data=model_data %>% select(nihtbx_pattern_uncorrected) %>% as.matrix()
+  , pm =popPs[["mean"]]
+  , pv = popPs[["var"]]
+  , pe = popPs[["Estimate"]]
+  , e = s12_model_out_s$coefficients[2,1:2][["Estimate"]]
+  , es = s12_model_out_s$coefficients[2,1:2][["Std. Error"]]
+)
+s12_cc_outcomes
+
+# MI outcomes
+s12_imp_outcomes = list(
+  # MI Dataset(s) Summaries
+  # Bias of the Mean across imputed datasets
+  Mean_RelBias=rel_bias(popP = popPs[["mean"]]
+                        , estP = mice::complete(model_data_imp, action="long", include = TRUE) %>% filter(.imp != 0) %>% rename(nihtbx_pattern_uncorrected_imp = nihtbx_pattern_uncorrected) %>% group_by(.imp) %>% summarise(nihtbx_pattern_uncorrected_mean = mean(nihtbx_pattern_uncorrected_imp)) %>% select(nihtbx_pattern_uncorrected_mean) %>% as.matrix()
+                        )
+  # Bias of the Variance
+  , Variance_RelBias = rel_bias(popP = popPs[["var"]]
+                             , estP = mice::complete(model_data_imp, action="long", include = TRUE) %>% filter(.imp != 0) %>% rename(nihtbx_pattern_uncorrected_imp = nihtbx_pattern_uncorrected) %>% group_by(.imp) %>% summarise(nihtbx_pattern_uncorrected_var = var(nihtbx_pattern_uncorrected_imp)) %>% select(nihtbx_pattern_uncorrected_var) %>% as.matrix() 
+                               )
+  
+  # Bias of the parameter
+  , Beta_RelBias = rel_bias(popP = popPs[["Estimate"]], estP = s12_model_out_imppool_s$estimate[2])
+  , Beta_StdBias = std_bias(popP = popPs[["Estimate"]], estP = s12_model_out_imppool_s$estimate[2], stdev = s12_model_out_imppool_s$std.error[2])
+  # Bias + Efficiency
+  , Beta_RMSE = rmse_bias(popP = popPs[["Estimate"]], estP = s12_model_out_imppool_s$estimate[2])
+  ) %>% as.data.frame()
+s12_imp_outcomes
+```
+
+
+
+
+# Scenario Set 2.1 Simulation: Single Imputation, nRepls = 500, nMissing=p_list, nPreds=0
+
+## Simulation
+```{r}
+# different %'s
+p_list = c(1,5,10,20,25,40,45,60,65,80,85,95,99)/100
+# replications
+nRepls = 500
+# base seed
+baseseed = 22
+# N
+n_size = 10000
+# m
+m_size = 1
+
+# Betas
+s21_imp_results = matrix(NA,nRepls,length(p_list)*2)
+s21_imp_results = data.frame(s21_imp_results)
+colnames(s21_imp_results) = paste("percent_", c("beta_","stderr_"),sort(rep(p_list,2)), sep = "")
+
+s21_cc_results = matrix(NA,nRepls,length(p_list)*2)
+s21_cc_results = data.frame(s21_cc_results)
+colnames(s21_cc_results) = paste("percent_", c("beta_","stderr_"),sort(rep(p_list,2)), sep = "")
+
+# Means and Variances per each imputed dataset
+s21_imp_results_summs = matrix(NA,nRepls*m_size,length(p_list)*2)
+s21_imp_results_summs = data.frame(s21_imp_results_summs)
+colnames(s21_imp_results_summs) = paste("percent_", c("mean_","var_"),sort(rep(p_list,2)), sep = "")
+
+s21_cc_results_summs = matrix(NA,nRepls,length(p_list)*2)
+s21_cc_results_summs = data.frame(s21_cc_results_summs)
+colnames(s21_cc_results_summs) = paste("percent_", c("mean_","var_"),sort(rep(p_list,2)), sep = "")
+
+
+# counter=0
+suppressWarnings(
+  for (j in 1:length(p_list)) {
+    # counter=counter+1
+    for (i in 1:nRepls) {
+      # Induce Missingness
+      set.seed(baseseed+j+i+1)
+      # sample(x=c(1:10000),size=(10000-1),replace = F)
+      sub_samp_inds = sample.int(n_size,size=n_size*p_list[j],replace = F)
+      model_data <- analysis_data
+      model_data[sub_samp_inds,"nihtbx_pattern_uncorrected"] <- NA
+      
+      
+      ### Complete Case
+      # Store Means/Variances
+      s21_cc_results_summs[i, c(((j*2)-1):(j*2))] = model_data %>% summarise(nihtbx_pattern_uncorrected_mean = mean(nihtbx_pattern_uncorrected, na.rm=T), nihtbx_pattern_uncorrected_var = var(nihtbx_pattern_uncorrected, na.rm=T)) %>% as.matrix()
+      # Model
+      model_out <- lm(nihtbx_pattern_uncorrected ~ 1 + interview_age, data=model_data)
+      model_out_s = summary(model_out)
+      # Store Estimates
+      s21_cc_results[i, c(((j*2)-1):(j*2))] <- model_out_s$coefficients[2,1:2]
+      
+      
+      
+      ### Multiple Imputation
+      # Impute
+      model_data_imp = imp_fun(data = model_data, seed = baseseed+j+i, m = m_size, keep_vars = c("nihtbx_pattern_uncorrected"))
+      # Store Means/Variances c(((i*10)-(10-1)):(i*10))
+      s21_imp_results_summs[c(((i*m_size)-(m_size-1)):(i*m_size)), c(((j*2)-1):(j*2))] = mice::complete(model_data_imp, action="long", include = TRUE) %>% filter(.imp != 0) %>% rename(nihtbx_pattern_uncorrected_imp = nihtbx_pattern_uncorrected) %>% group_by(.imp) %>% summarise(nihtbx_pattern_uncorrected_mean = mean(nihtbx_pattern_uncorrected_imp), nihtbx_pattern_uncorrected_var = var(nihtbx_pattern_uncorrected_imp)) %>% ungroup() %>% select(-.imp) %>% as.matrix()
+      # Model
+      # Fit the same model to each of the imputed datasets and pool the results
+      model_out_imp <- with(data=model_data_imp, exp=lm(nihtbx_pattern_uncorrected ~ 1 + interview_age))
+      # Pool the results
+      model_out_imppool <- pool(model_out_imp)
+      model_out_imppool_s = summary(model_out_imppool)
+
+      # Store Estimates
+      s21_imp_results[i, c(((j*2)-1):(j*2))] <- model_out_imppool_s$coefficients[2,1:2]
+      
+    } #end replications
+} #end p size
+) #warnings
+
+
+rm(j, i, counter, sub_samp_inds, model_data, model_out, model_out_s, model_data_imp, model_out_imppool, model_out_imppool_s)
+```
+
+
+
+
+## Distribution Plots
+
+### CC Results
+```{r}
+s21_cc_results %>%
+  tidyr::pivot_longer(cols = everything(),
+                                   names_to = c("Condition", "Estimate", "PercentMiss"),
+                                   names_sep = "_",
+                                   values_to = "value") %>% select(-Condition) %>%
+  # filter(Estimate=="beta") %>%
+  # Predefine binwidths per variable
+  group_by(Estimate) %>%
+  dplyr::mutate(bins = cut(value, breaks=25)
+                , bins = str_extract(bins, "\\d+\\.*\\d*")) %>% ungroup () %>%
+
+  ggplot(aes(x = bins, fill=as.numeric(PercentMiss), group=as.numeric(PercentMiss))) +
+    # geom_histogram(alpha=1, position="stack", fill="darkgrey", col="white") +
+    geom_histogram(alpha=1, position="stack", col="white", stat="count") +
+    labs(title="Scenario Set 2.1: NIHTB Processing Speed Results Across Replications"
+         , subtitle = "Complete-Case, nMissing=p_list"
+         , x="Estimate"
+         , y="Frequency"
+         , fill="Percent Missing") +
+    facet_wrap(~Estimate, scales = "free") +
+    theme(axis.text.x = element_text(angle=45))
+```
+
+### CC Summaries
+```{r}
+s21_cc_results_summs %>%
+  tidyr::pivot_longer(cols = everything(),
+                                   names_to = c("Condition", "Statistic", "PercentMiss"),
+                                   names_sep = "_",
+                                   values_to = "value") %>% select(-Condition) %>%
+  # filter(Estimate=="beta") %>%
+  # Predefine binwidths per variable
+  group_by(Statistic) %>%
+  dplyr::mutate(bins = cut(value, breaks=25)
+                , bins = str_extract(bins, "\\d+\\.*\\d*")) %>%  ungroup() %>%
+
+  ggplot(aes(x = bins, fill=as.numeric(PercentMiss), group=as.numeric(PercentMiss))) +
+    # geom_histogram(alpha=1, position="stack", fill="darkgrey", col="white") +
+    geom_histogram(alpha=1, position="stack", col="white", stat="count") +
+    labs(title="Scenario Set 2.1: NIHTB Processing Speed Descriptives Across Replications"
+         , subtitle = "Complete-Case, nMissing=p_list"
+         , x="Estimate"
+         , y="Frequency"
+         , fill="Percent Missing") +
+    facet_wrap(~Statistic, scales = "free") +
+    theme(axis.text.x = element_text(angle=45))
+```
+
+
+
+
+### SI Results
+```{r}
+s21_imp_results %>%
+  tidyr::pivot_longer(cols = everything(),
+                                   names_to = c("Condition", "Estimate", "PercentMiss"),
+                                   names_sep = "_",
+                                   values_to = "value") %>% select(-Condition) %>%
+  # filter(Estimate=="beta") %>%
+  # Predefine binwidths per variable
+  group_by(Estimate) %>%
+  dplyr::mutate(bins = cut(value, breaks=25)
+                , bins = str_extract(bins, "\\d+\\.*\\d*")) %>%  ungroup() %>%
+
+  ggplot(aes(x = bins, fill=as.numeric(PercentMiss), group=as.numeric(PercentMiss))) +
+    # geom_histogram(alpha=1, position="stack", fill="darkgrey", col="white") +
+    geom_histogram(alpha=1, position="stack", col="white", stat="count") +
+    labs(title="Scenario Set 2.1: NIHTB Processing Speed Results Across Replications"
+         , subtitle = "Single Imputation, nMissing=p_list, nPreds=0"
+         , x="Estimate"
+         , y="Frequency"
+         , fill="Percent Missing") +
+    facet_wrap(~Estimate, scales = "free") +
+    theme(axis.text.x = element_text(angle=45))
+```
+
+### SI Summaries
+```{r}
+s21_imp_results_summs %>%
+  tidyr::pivot_longer(cols = everything(),
+                                   names_to = c("Condition", "Statistic", "PercentMiss"),
+                                   names_sep = "_",
+                                   values_to = "value") %>% select(-Condition) %>%
+  # filter(Estimate=="beta") %>%
+  # Predefine binwidths per variable
+  group_by(Statistic) %>%
+  dplyr::mutate(bins = cut(value, breaks=25)
+                , bins = str_extract(bins, "\\d+\\.*\\d*")) %>%  ungroup() %>%
+
+  ggplot(aes(x = bins, color=as.numeric(PercentMiss), group=as.numeric(PercentMiss))) +
+    # geom_histogram(alpha=1, position="stack", fill="darkgrey", col="white") +
+    geom_histogram(alpha=1, position="stack", col="white", stat="count") + 
+    labs(title="Scenario Set 2.1: NIHTB Processing Speed Descriptives Across Replications"
+         , subtitle = "Single Imputation, nMissing=p_list, nPreds=0"
+         , x="Estimate"
+         , y="Frequency"
+         , color="Percent Missing") +
+    facet_wrap(~Statistic, scales = "free") +
+    theme(axis.text.x = element_text(angle=45))
+```
+
+
+
+
+
+
+## Outcomes
+
+### CC
+```{r}
+s21_cc_outcomes = cbind(s21_cc_results,s21_cc_results_summs) %>%
+  tidyr::pivot_longer(cols = everything(),
+                                   names_to = c("Condition", "Estimate", "PercentMiss"),
+                                   names_sep = "_",
+                                   values_to = "value") %>% select(-Condition) %>% group_by(Estimate, PercentMiss) %>%
+  reframe(
+            # Bias of the Mean
+            Mean_RelBias = ifelse(Estimate=="mean", rel_bias(popP = popPs[["mean"]], estP = value), NA)
+            # Bias of the Variance
+            , Variance_RelBias = ifelse(Estimate=="var", rel_bias(popP = popPs[["var"]], estP = value), NA)
+            # Bias of the parameter
+            , Beta_RelBias = ifelse(Estimate=="beta", rel_bias(popP = popPs[["Estimate"]], estP = value), NA)
+            , Beta_StdBias = ifelse(Estimate=="beta", std_bias(popP = popPs[["Estimate"]], estP = value, stdev = sd(value)), NA)
+            # Bias + Efficiency
+            , Beta_RMSE = ifelse(Estimate=="beta", rmse_bias(popP = popPs[["Estimate"]], estP = value), NA)
+            ) %>% distinct()
+```
+
+#### Plot
+```{r}
+s21_cc_outcomes %>% pivot_longer(cols = contains("_"), names_to = c("Beta", "Outcome"), names_sep = "_", values_to = "value") %>% drop_na() %>%
+  
+  ggplot(aes(y=value, x=as.numeric(PercentMiss), color=as.numeric(PercentMiss))) + 
+      geom_point(show.legend = F) +
+      facet_wrap(~Beta+Outcome, scales = "free") +
+      labs(title="Scenario Set 2.1: NIHTB Processing Speed Outcomes"
+         , subtitle = "Complete-Case, nMissing=p_list"
+         , x="Percent Missing"
+         , y="Outcome Value"
+         , color="Percent Missing")
+```
+
+
+### SI
+```{r}
+s21_imp_outcomes = s21_imp_results %>%
+  tidyr::pivot_longer(cols = everything(),
+                                   names_to = c("Condition", "Estimate", "PercentMiss"),
+                                   names_sep = "_",
+                                   values_to = "value") %>% select(-Condition) %>% group_by(Estimate, PercentMiss) %>%
+  reframe(
+            # # Bias of the Mean
+            # Mean_RelBias = ifelse(Estimate=="mean", rel_bias(popP = popPs[["mean"]], estP = value), NA)
+            # # Bias of the Variance
+            # , Variance_RelBias = ifelse(Estimate=="var", rel_bias(popP = popPs[["var"]], estP = value), NA)
+            # Bias of the parameter
+            Beta_RelBias = ifelse(Estimate=="beta", rel_bias(popP = popPs[["Estimate"]], estP = value), NA)
+            , Beta_StdBias = ifelse(Estimate=="beta", std_bias(popP = popPs[["Estimate"]], estP = value, stdev = sd(value)), NA)
+            # Bias + Efficiency
+            , Beta_RMSE = ifelse(Estimate=="beta", rmse_bias(popP = popPs[["Estimate"]], estP = value), NA)
+            ) %>% distinct()
+```
+
+#### Plot
+```{r}
+s21_imp_outcomes %>% pivot_longer(cols = contains("_"), names_to = c("Beta", "Outcome"), names_sep = "_", values_to = "value") %>% drop_na() %>%
+  
+  ggplot(aes(y=value, x=as.numeric(PercentMiss), color=as.numeric(PercentMiss))) + 
+      geom_point(show.legend = F) +
+      facet_wrap(~Beta+Outcome, scales = "free") +
+      labs(title="Scenario Set 2.1: NIHTB Processing Speed Outcomes"
+         , subtitle = "Single Imputation, nMissing=p_list, nPreds=0"
+         , x="Percent Missing"
+         , y="Outcome Value"
+         , color="Percent Missing")
+```
+
+
+
+
+# Scenario Set 2.2 Simulation: Multiple Imputation, m=5, nRepls = 500, nMissing=p_list, nPreds=0
+## Simulation
+```{r}
+# different %'s
+p_list = c(1,5,10,20,25,40,45,60,65,80,85,95,99)/100
+# replications
+nRepls = 500
+# base seed
+baseseed = 22
+# N
+n_size = 10000
+# m
+m_size = 5
+
+# Betas
+s22_imp_results = matrix(NA,nRepls,length(p_list)*2)
+s22_imp_results = data.frame(s22_imp_results)
+colnames(s22_imp_results) = paste("percent_", c("beta_","stderr_"),sort(rep(p_list,2)), sep = "")
+
+s22_cc_results = matrix(NA,nRepls,length(p_list)*2)
+s22_cc_results = data.frame(s22_cc_results)
+colnames(s22_cc_results) = paste("percent_", c("beta_","stderr_"),sort(rep(p_list,2)), sep = "")
+
+# Means and Variances per each imputed dataset
+s22_imp_results_summs = matrix(NA,nRepls*m_size,length(p_list)*2)
+s22_imp_results_summs = data.frame(s22_imp_results_summs)
+colnames(s22_imp_results_summs) = paste("percent_", c("mean_","var_"),sort(rep(p_list,2)), sep = "")
+
+s22_cc_results_summs = matrix(NA,nRepls,length(p_list)*2)
+s22_cc_results_summs = data.frame(s22_cc_results_summs)
+colnames(s22_cc_results_summs) = paste("percent_", c("mean_","var_"),sort(rep(p_list,2)), sep = "")
+
+
+#setup parallel backend to use many processors
+# cores=detectCores() #this would allow the max
+cores=6 #not to overload your computer
+# Fork uses the same global env for all cores - does not make separate copies of packages.
+#for type = "PSOCK", copy necessary packages: foreach(i=1:nRepls, .combine=cbind, .packages=c("dplyr", "tidyr", "mice"))
+cl <- parallel::makeCluster(cores, type = "FORK")
+doParallel::registerDoParallel(cl = cl)
+
+suppressWarnings(
+  for (j in 1:length(p_list)) {
+    # counter=counter+1
+    # for (i in 1:nRepls) {
+    s22_results <- foreach(i=1:nRepls, .combine = "rbind") %dopar% {
+      # Induce Missingness
+      set.seed(baseseed+j+i+1)
+      # sample(x=c(1:10000),size=(10000-1),replace = F)
+      sub_samp_inds = sample.int(n_size,size=n_size*p_list[j],replace = F)
+      model_data <- analysis_data
+      model_data[sub_samp_inds,"nihtbx_pattern_uncorrected"] <- NA
+      
+      
+      ### Complete Case
+      # Store Means/Variances
+      # s22_cc_results_summs[i, c(((j*2)-1):(j*2))] = model_data %>% summarise(nihtbx_pattern_uncorrected_mean = mean(nihtbx_pattern_uncorrected, na.rm=T), nihtbx_pattern_uncorrected_var = var(nihtbx_pattern_uncorrected, na.rm=T)) %>% as.matrix()
+      s22_cc_results_summs = model_data %>% summarise(nihtbx_pattern_uncorrected_mean = mean(nihtbx_pattern_uncorrected, na.rm=T), nihtbx_pattern_uncorrected_var = var(nihtbx_pattern_uncorrected, na.rm=T)) %>% as.matrix() %>% as.vector()
+      # Model
+      model_out <- lm(nihtbx_pattern_uncorrected ~ 1 + interview_age, data=model_data)
+      model_out_s = summary(model_out)
+      # Store Estimates
+      # s22_cc_results[i, c(((j*2)-1):(j*2))] <- as.vector(model_out_s$coefficients[2,1:2])
+      s22_cc_results = model_out_s$coefficients[2,1:2] %>% as.vector()
+      
+      
+      ### Multiple Imputation
+      # Impute
+      model_data_imp = imp_fun(data = model_data, seed = baseseed+j+i, m = m_size, keep_vars = c("nihtbx_pattern_uncorrected"))
+      # Store Means/Variances c(((i*10)-(10-1)):(i*10))
+      # s22_imp_results_summs[c(((i*m_size)-(m_size-1)):(i*m_size)), c(((j*2)-1):(j*2))] = mice::complete(model_data_imp, action="long", include = TRUE) %>% filter(.imp != 0) %>% rename(nihtbx_pattern_uncorrected_imp = nihtbx_pattern_uncorrected) %>% group_by(.imp) %>% summarise(nihtbx_pattern_uncorrected_mean = mean(nihtbx_pattern_uncorrected_imp), nihtbx_pattern_uncorrected_var = var(nihtbx_pattern_uncorrected_imp)) %>% ungroup() %>% select(-.imp) %>% as.matrix()
+      s22_imp_results_summs = mice::complete(model_data_imp, action="long", include = TRUE) %>% filter(.imp != 0) %>% rename(nihtbx_pattern_uncorrected_imp = nihtbx_pattern_uncorrected) %>% group_by(.imp) %>% summarise(nihtbx_pattern_uncorrected_mean = mean(nihtbx_pattern_uncorrected_imp), nihtbx_pattern_uncorrected_var = var(nihtbx_pattern_uncorrected_imp)) %>% ungroup() %>% select(-.imp) %>% as.matrix()
+      # Model
+      # Fit the same model to each of the imputed datasets and pool the results
+      model_out_imp <- with(data=model_data_imp, exp=lm(nihtbx_pattern_uncorrected ~ 1 + interview_age))
+      # Pool the results
+      model_out_imppool <- pool(model_out_imp)
+      model_out_imppool_s = summary(model_out_imppool)
+
+      # Store Estimates
+      # s22_imp_results[i, c(((j*2)-1):(j*2))] <- model_out_imppool_s[2,c("estimate","std.error")] %>% as.matrix() %>% as.vector()
+      s22_imp_results <- model_out_imppool_s[2,c("estimate","std.error")] %>% as.matrix() %>% as.vector()
+      
+      
+      list(s22_cc_results_summs=s22_cc_results_summs, s22_cc_results=s22_cc_results, s22_imp_results_summs=s22_imp_results_summs, s22_imp_results=s22_imp_results)
+      # list(s22_cc_results_summs, s22_cc_results)
+      
+    } #end replications
+    
+    s22_cc_results_summs[, c(((j*2)-1):(j*2))] <- do.call(rbind, s22_results[,"s22_cc_results_summs"])
+    s22_cc_results[, c(((j*2)-1):(j*2))] <- do.call(rbind, s22_results[,"s22_cc_results"])
+    s22_imp_results_summs[, c(((j*2)-1):(j*2))] <- do.call(rbind, s22_results[,"s22_imp_results_summs"])
+    s22_imp_results[, c(((j*2)-1):(j*2))] <- do.call(rbind, s22_results[,"s22_imp_results"])
+    
+  } #end p size
+) #warnings
+#stop cluster
+parallel::stopCluster(cl = cl)
+
+rm(j, i, s22_results, sub_samp_inds, model_data, model_out, model_out_s, model_data_imp, model_out_imppool, model_out_imppool_s)
+```
+
+
+
+
+## Distribution Plots
+
+### CC Results
+```{r}
+s22_cc_results %>%
+  tidyr::pivot_longer(cols = everything(),
+                                   names_to = c("Condition", "Estimate", "PercentMiss"),
+                                   names_sep = "_",
+                                   values_to = "value") %>% select(-Condition) %>%
+  # filter(Estimate=="beta") %>%
+  # Predefine binwidths per variable
+  group_by(Estimate) %>%
+  dplyr::mutate(bins = cut(value, breaks=25)
+                , bins = str_extract(bins, "\\d+\\.*\\d*")) %>%  ungroup() %>%
+
+  ggplot(aes(x = bins, fill=as.numeric(PercentMiss), group=as.numeric(PercentMiss))) +
+    # geom_histogram(alpha=1, position="stack", fill="darkgrey", col="white") +
+    geom_histogram(alpha=1, position="stack", col="white", stat="count") +
+    labs(title="Scenario Set 2.2: NIHTB Processing Speed Results Across Replications"
+         , subtitle = "Complete-Case, nMissing=p_list"
+         , x="Estimate"
+         , y="Frequency"
+         , fill="Percent Missing") +
+    facet_wrap(~Estimate, scales = "free") +
+    theme(axis.text.x = element_text(angle=45))
+```
+
+### CC Summaries
+```{r}
+s22_cc_results_summs %>%
+  tidyr::pivot_longer(cols = everything(),
+                                   names_to = c("Condition", "Statistic", "PercentMiss"),
+                                   names_sep = "_",
+                                   values_to = "value") %>% select(-Condition) %>%
+  # filter(Estimate=="beta") %>%
+  # Predefine binwidths per variable
+  group_by(Statistic) %>%
+  dplyr::mutate(bins = cut(value, breaks=25)
+                , bins = str_extract(bins, "\\d+\\.*\\d*")) %>%  ungroup() %>%
+
+  ggplot(aes(x = bins, fill=as.numeric(PercentMiss), group=as.numeric(PercentMiss))) +
+    # geom_histogram(alpha=1, position="stack", fill="darkgrey", col="white") +
+    geom_histogram(alpha=1, position="stack", col="white", stat="count") +
+    labs(title="Scenario Set 2.2: NIHTB Processing Speed Descriptives Across Replications"
+         , subtitle = "Complete-Case, nMissing=p_list"
+         , x="Estimate"
+         , y="Frequency"
+         , fill="Percent Missing") +
+    facet_wrap(~Statistic, scales = "free") +
+    theme(axis.text.x = element_text(angle=45))
+```
+
+
+
+
+### MI Results
+```{r}
+s22_imp_results %>%
+  tidyr::pivot_longer(cols = everything(),
+                                   names_to = c("Condition", "Estimate", "PercentMiss"),
+                                   names_sep = "_",
+                                   values_to = "value") %>% select(-Condition) %>%
+  # filter(Estimate=="beta") %>%
+  # Predefine binwidths per variable
+  group_by(Estimate) %>%
+  dplyr::mutate(bins = cut(value, breaks=25)
+                , bins = str_extract(bins, "\\d+\\.*\\d*")) %>%  ungroup() %>%
+
+  ggplot(aes(x = bins, fill=as.numeric(PercentMiss), group=as.numeric(PercentMiss))) +
+    # geom_histogram(alpha=1, position="stack", fill="darkgrey", col="white") +
+    geom_histogram(alpha=1, position="stack", col="white", stat="count") +
+    labs(title="Scenario Set 2.2: NIHTB Processing Speed Results Across Replications"
+         , subtitle = "Multiple Imputation, nMissing=p_list, nPreds=0"
+         , x="Estimate"
+         , y="Frequency"
+         , fill="Percent Missing") +
+    facet_wrap(~Estimate, scales = "free") +
+    theme(axis.text.x = element_text(angle=45))
+```
+
+### MI Summaries
+```{r}
+s22_imp_results_summs %>%
+  tidyr::pivot_longer(cols = everything(),
+                                   names_to = c("Condition", "Statistic", "PercentMiss"),
+                                   names_sep = "_",
+                                   values_to = "value") %>% select(-Condition) %>%
+  # Predefine binwidths per variable
+  group_by(Statistic) %>%
+  dplyr::mutate(bins = cut(value, breaks=25)
+                , bins = str_extract(bins, "\\d+\\.*\\d*")) %>%  ungroup() %>%
+
+  ggplot(aes(x = bins, color=as.numeric(PercentMiss), group=as.numeric(PercentMiss))) +
+    # geom_histogram(alpha=1, position="stack", fill="darkgrey", col="white") +
+    geom_histogram(alpha=1, position="stack", stat="count") +#col="white", 
+    labs(title="Scenario Set 2.2: NIHTB Processing Speed Descriptives Across Replications"
+         , subtitle = "Multiple Imputation, nMissing=p_list, nPreds=0"
+         , x="Estimate"
+         , y="Frequency"
+         , color="Percent Missing") +
+    facet_wrap(~Statistic, scales = "free") +
+    theme(axis.text.x = element_text(angle=45))
+```
+
+### OLD
+```{r}
+
+resultListBetas %>%
+  tidyr::pivot_longer(cols = everything(),
+                                   names_to = c("Condition", "PercentMiss"),
+                                   names_pattern = "^([^_]+)_?([^*]+)",
+                                   values_to = "value") %>% select(-Condition) %>%
+  # Predefine binwidths per variable
+  group_by(PercentMiss) %>%
+  dplyr::mutate(bins = cut(value, breaks=25)
+                , bins = str_extract(bins, "\\d+\\.*\\d*")) %>%  ungroup() %>%
+
+  ggplot(aes(x = bins)) +
+    # geom_histogram(alpha=1, position="stack", fill="darkgrey", col="white") +
+    geom_histogram(alpha=1, position="stack", fill="darkgrey", col="white", stat="count") +
+    labs(y="Frequency") +
+    # theme_classic(base_size = 12) +
+    facet_wrap(~PercentMiss, scales = "free") +
+    theme(axis.text.x = element_text(angle=45))
+```
+
+
+
+
+
+
+## Outcomes
+
+### CC
+```{r}
+s22_cc_outcomes = cbind(s22_cc_results,s22_cc_results_summs) %>%
+  tidyr::pivot_longer(cols = everything(),
+                                   names_to = c("Condition", "Estimate", "PercentMiss"),
+                                   names_sep = "_",
+                                   values_to = "value") %>% select(-Condition) %>% group_by(Estimate, PercentMiss) %>%
+  reframe(
+            # Bias of the Mean
+            Mean_RelBias = ifelse(Estimate=="mean", rel_bias(popP = popPs[["mean"]], estP = value), NA)
+            # Bias of the Variance
+            , Variance_RelBias = ifelse(Estimate=="var", rel_bias(popP = popPs[["var"]], estP = value), NA)
+            # Bias of the parameter
+            , Beta_RelBias = ifelse(Estimate=="beta", rel_bias(popP = popPs[["Estimate"]], estP = value), NA)
+            , Beta_StdBias = ifelse(Estimate=="beta", std_bias(popP = popPs[["Estimate"]], estP = value, stdev = sd(value)), NA)
+            # Bias + Efficiency
+            , Beta_RMSE = ifelse(Estimate=="beta", rmse_bias(popP = popPs[["Estimate"]], estP = value), NA)
+            ) %>% distinct()
+```
+
+#### Plot
+```{r}
+s22_cc_outcomes %>% pivot_longer(cols = contains("_"), names_to = c("Beta", "Outcome"), names_sep = "_", values_to = "value") %>% drop_na() %>%
+  
+  ggplot(aes(y=value, x=as.numeric(PercentMiss), color=as.numeric(PercentMiss))) + 
+      geom_point(show.legend = F) +
+      facet_wrap(~Beta+Outcome, scales = "free") +
+      labs(title="Scenario Set 2.2: NIHTB Processing Speed Outcomes"
+         , subtitle = "Complete-Case, nMissing=p_list"
+         , x="Percent Missing"
+         , y="Outcome Value"
+         , color="Percent Missing")
+```
+
+### MI
+```{r}
+s22_imp_outcomes = s22_imp_results %>%
+  tidyr::pivot_longer(cols = everything(),
+                                   names_to = c("Condition", "Estimate", "PercentMiss"),
+                                   names_sep = "_",
+                                   values_to = "value") %>% select(-Condition) %>% group_by(Estimate, PercentMiss) %>%
+  reframe(
+            # # Bias of the Mean
+            # Mean_RelBias = ifelse(Estimate=="mean", rel_bias(popP = popPs[["mean"]], estP = value), NA)
+            # # Bias of the Variance
+            # , Variance_RelBias = ifelse(Estimate=="var", rel_bias(popP = popPs[["var"]], estP = value), NA)
+            # Bias of the parameter
+            Beta_RelBias = ifelse(Estimate=="beta", rel_bias(popP = popPs[["Estimate"]], estP = value), NA)
+            , Beta_StdBias = ifelse(Estimate=="beta", std_bias(popP = popPs[["Estimate"]], estP = value, stdev = sd(value)), NA)
+            # Bias + Efficiency
+            , Beta_RMSE = ifelse(Estimate=="beta", rmse_bias(popP = popPs[["Estimate"]], estP = value), NA)
+            , Beta_Efficiency = ifelse(Estimate=="beta", raw_eff(estP = value), NA)
+            ) %>% distinct()
+```
+
+
+#### Plot
+```{r}
+s22_imp_outcomes %>% pivot_longer(cols = contains("_"), names_to = c("Beta", "Outcome"), names_sep = "_", values_to = "value") %>% drop_na() %>%
+  
+  ggplot(aes(y=value, x=as.numeric(PercentMiss), color=as.numeric(PercentMiss))) + 
+      geom_point(show.legend = F) +
+      facet_wrap(~Beta+Outcome, scales = "free") +
+      labs(title="Scenario Set 2.2: NIHTB Processing Speed Outcomes"
+         , subtitle = "Single Imputation, nMissing=p_list, nPreds=0"
+         , x="Percent Missing"
+         , y="Outcome Value"
+         , color="Percent Missing")
+```
+
+
+
+
+
+
+
+
+# Scenario Set 3.1 Simulation: Multiple Imputation, m=5, nRepls = 500, nMissing=p_list, nPreds=1
+## Simulation
+```{r}
+# different %'s
+p_list = c(1,5,10,20,25,40,45,60,65,80,85,95,99)/100
+# replications
+nRepls = 500
+# base seed
+baseseed = 23
+# N
+n_size = 10000
+# m
+m_size = 5
+
+# Betas
+s32_imp_results = matrix(NA,nRepls,length(p_list)*2)
+s32_imp_results = data.frame(s32_imp_results)
+colnames(s32_imp_results) = paste("percent_", c("beta_","stderr_"),sort(rep(p_list,2)), sep = "")
+
+s32_cc_results = matrix(NA,nRepls,length(p_list)*2)
+s32_cc_results = data.frame(s32_cc_results)
+colnames(s32_cc_results) = paste("percent_", c("beta_","stderr_"),sort(rep(p_list,2)), sep = "")
+
+# Means and Variances per each imputed dataset
+s32_imp_results_summs = matrix(NA,nRepls*m_size,length(p_list)*2)
+s32_imp_results_summs = data.frame(s32_imp_results_summs)
+colnames(s32_imp_results_summs) = paste("percent_", c("mean_","var_"),sort(rep(p_list,2)), sep = "")
+
+s32_cc_results_summs = matrix(NA,nRepls,length(p_list)*2)
+s32_cc_results_summs = data.frame(s32_cc_results_summs)
+colnames(s32_cc_results_summs) = paste("percent_", c("mean_","var_"),sort(rep(p_list,2)), sep = "")
+
+
+#setup parallel backend to use many processors
+# cores=detectCores() #this would allow the max
+cores=6 #not to overload your computer
+# Fork uses the same global env for all cores - does not make separate copies of packages.
+#for type = "PSOCK", copy necessary packages: foreach(i=1:nRepls, .combine=cbind, .packages=c("dplyr", "tidyr", "mice"))
+cl <- parallel::makeCluster(cores, type = "FORK")
+doParallel::registerDoParallel(cl = cl)
+
+suppressWarnings(
+  for (j in 1:length(p_list)) {
+    # counter=counter+1
+    # for (i in 1:nRepls) {
+    s32_results <- foreach(i=1:nRepls, .combine = "rbind") %dopar% {
+      # Induce Missingness
+      set.seed(baseseed+j+i+1)
+      # sample(x=c(1:10000),size=(10000-1),replace = F)
+      sub_samp_inds = sample.int(n_size,size=n_size*p_list[j],replace = F)
+      model_data <- analysis_data
+      model_data[sub_samp_inds,"nihtbx_pattern_uncorrected"] <- NA
+      
+      
+      ### Complete Case
+      # Store Means/Variances
+      # s32_cc_results_summs[i, c(((j*2)-1):(j*2))] = model_data %>% summarise(nihtbx_pattern_uncorrected_mean = mean(nihtbx_pattern_uncorrected, na.rm=T), nihtbx_pattern_uncorrected_var = var(nihtbx_pattern_uncorrected, na.rm=T)) %>% as.matrix()
+      s32_cc_results_summs = model_data %>% summarise(nihtbx_pattern_uncorrected_mean = mean(nihtbx_pattern_uncorrected, na.rm=T), nihtbx_pattern_uncorrected_var = var(nihtbx_pattern_uncorrected, na.rm=T)) %>% as.matrix() %>% as.vector()
+      # Model
+      model_out <- lm(nihtbx_pattern_uncorrected ~ 1 + interview_age, data=model_data)
+      model_out_s = summary(model_out)
+      # Store Estimates
+      # s32_cc_results[i, c(((j*2)-1):(j*2))] <- as.vector(model_out_s$coefficients[2,1:2])
+      s32_cc_results = model_out_s$coefficients[2,1:2] %>% as.vector()
+      
+      
+      ### Multiple Imputation
+      # Impute
+      model_data_imp = imp_fun(data = model_data, seed = baseseed+j+i, m = m_size, keep_vars = c("nihtbx_pattern_uncorrected", "interview_age"))
+      # Store Means/Variances c(((i*10)-(10-1)):(i*10))
+      # s32_imp_results_summs[c(((i*m_size)-(m_size-1)):(i*m_size)), c(((j*2)-1):(j*2))] = mice::complete(model_data_imp, action="long", include = TRUE) %>% filter(.imp != 0) %>% rename(nihtbx_pattern_uncorrected_imp = nihtbx_pattern_uncorrected) %>% group_by(.imp) %>% summarise(nihtbx_pattern_uncorrected_mean = mean(nihtbx_pattern_uncorrected_imp), nihtbx_pattern_uncorrected_var = var(nihtbx_pattern_uncorrected_imp)) %>% ungroup() %>% select(-.imp) %>% as.matrix()
+      s32_imp_results_summs = mice::complete(model_data_imp, action="long", include = TRUE) %>% filter(.imp != 0) %>% rename(nihtbx_pattern_uncorrected_imp = nihtbx_pattern_uncorrected) %>% group_by(.imp) %>% summarise(nihtbx_pattern_uncorrected_mean = mean(nihtbx_pattern_uncorrected_imp), nihtbx_pattern_uncorrected_var = var(nihtbx_pattern_uncorrected_imp)) %>% ungroup() %>% select(-.imp) %>% as.matrix()
+      # Model
+      # Fit the same model to each of the imputed datasets and pool the results
+      model_out_imp <- with(data=model_data_imp, exp=lm(nihtbx_pattern_uncorrected ~ 1 + interview_age))
+      # Pool the results
+      model_out_imppool <- pool(model_out_imp)
+      model_out_imppool_s = summary(model_out_imppool)
+
+      # Store Estimates
+      # s32_imp_results[i, c(((j*2)-1):(j*2))] <- model_out_imppool_s[2,c("estimate","std.error")] %>% as.matrix() %>% as.vector()
+      s32_imp_results <- model_out_imppool_s[2,c("estimate","std.error")] %>% as.matrix() %>% as.vector()
+      
+      
+      list(s32_cc_results_summs=s32_cc_results_summs, s32_cc_results=s32_cc_results, s32_imp_results_summs=s32_imp_results_summs, s32_imp_results=s32_imp_results)
+      
+    } #end replications
+    
+    s32_cc_results_summs[, c(((j*2)-1):(j*2))] <- do.call(rbind, s32_results[,"s32_cc_results_summs"])
+    s32_cc_results[, c(((j*2)-1):(j*2))] <- do.call(rbind, s32_results[,"s32_cc_results"])
+    s32_imp_results_summs[, c(((j*2)-1):(j*2))] <- do.call(rbind, s32_results[,"s32_imp_results_summs"])
+    s32_imp_results[, c(((j*2)-1):(j*2))] <- do.call(rbind, s32_results[,"s32_imp_results"])
+    
+  } #end p size
+) #warnings
+#stop cluster
+parallel::stopCluster(cl = cl)
+```
+
+
+
+
+## Distribution Plots
+
+
+### MI Results
+```{r}
+s32_imp_results %>%
+  tidyr::pivot_longer(cols = everything(),
+                                   names_to = c("Condition", "Estimate", "PercentMiss"),
+                                   names_sep = "_",
+                                   values_to = "value") %>% select(-Condition) %>%
+  # filter(Estimate=="beta") %>%
+  # Predefine binwidths per variable
+  group_by(Estimate) %>%
+  dplyr::mutate(bins = cut(value, breaks=25)
+                , bins = str_extract(bins, "\\d+\\.*\\d*")) %>%  ungroup() %>%
+
+  ggplot(aes(x = bins, fill=as.numeric(PercentMiss), group=as.numeric(PercentMiss))) +
+    # geom_histogram(alpha=1, position="stack", fill="darkgrey", col="white") +
+    geom_histogram(alpha=1, position="stack", col="white", stat="count") +
+    labs(title="Scenario Set 3.2: NIHTB Processing Speed Results Across Replications"
+         , subtitle = "Multiple Imputation, nMissing=p_list, nPreds=1"
+         , x="Estimate"
+         , y="Frequency"
+         , fill="Percent Missing") +
+    facet_wrap(~Estimate, scales = "free") +
+    theme(axis.text.x = element_text(angle=45))
+```
+
+### MI Summaries
+```{r}
+s32_imp_results_summs %>%
+  tidyr::pivot_longer(cols = everything(),
+                                   names_to = c("Condition", "Statistic", "PercentMiss"),
+                                   names_sep = "_",
+                                   values_to = "value") %>% select(-Condition) %>%
+  # Predefine binwidths per variable
+  group_by(Statistic) %>%
+  dplyr::mutate(bins = cut(value, breaks=25)
+                , bins = str_extract(bins, "\\d+\\.*\\d*")) %>%  ungroup() %>%
+
+  ggplot(aes(x = bins, color=as.numeric(PercentMiss), group=as.numeric(PercentMiss))) +
+    # geom_histogram(alpha=1, position="stack", fill="darkgrey", col="white") +
+    geom_histogram(alpha=1, position="stack", stat="count") +#col="white", 
+    labs(title="Scenario Set 3.1: NIHTB Processing Speed Descriptives Across Replications"
+         , subtitle = "Multiple Imputation, nMissing=p_list, nPreds=1"
+         , x="Estimate"
+         , y="Frequency"
+         , color="Percent Missing") +
+    facet_wrap(~Statistic, scales = "free") +
+    theme(axis.text.x = element_text(angle=45))
+```
+
+### OLD
+```{r}
+
+resultListBetas %>%
+  tidyr::pivot_longer(cols = everything(),
+                                   names_to = c("Condition", "PercentMiss"),
+                                   names_pattern = "^([^_]+)_?([^*]+)",
+                                   values_to = "value") %>% select(-Condition) %>%
+  # Predefine binwidths per variable
+  group_by(PercentMiss) %>%
+  dplyr::mutate(bins = cut(value, breaks=25)
+                , bins = str_extract(bins, "\\d+\\.*\\d*")) %>%  ungroup() %>%
+
+  ggplot(aes(x = bins)) +
+    # geom_histogram(alpha=1, position="stack", fill="darkgrey", col="white") +
+    geom_histogram(alpha=1, position="stack", fill="darkgrey", col="white", stat="count") +
+    labs(y="Frequency") +
+    # theme_classic(base_size = 12) +
+    facet_wrap(~PercentMiss, scales = "free") +
+    theme(axis.text.x = element_text(angle=45))
+```
+
+
+
+
+
+
+## Outcomes
+
+### MI
+```{r}
+s32_imp_outcomes = s32_imp_results %>%
+  tidyr::pivot_longer(cols = everything(),
+                                   names_to = c("Condition", "Estimate", "PercentMiss"),
+                                   names_sep = "_",
+                                   values_to = "value") %>% select(-Condition) %>% group_by(Estimate, PercentMiss) %>%
+  reframe(
+            # # Bias of the Mean
+            # Mean_RelBias = ifelse(Estimate=="mean", rel_bias(popP = popPs[["mean"]], estP = value), NA)
+            # # Bias of the Variance
+            # , Variance_RelBias = ifelse(Estimate=="var", rel_bias(popP = popPs[["var"]], estP = value), NA)
+            # Bias of the parameter
+            Beta_RelBias = ifelse(Estimate=="beta", rel_bias(popP = popPs[["Estimate"]], estP = value), NA)
+            , Beta_StdBias = ifelse(Estimate=="beta", std_bias(popP = popPs[["Estimate"]], estP = value, stdev = sd(value)), NA)
+            # Bias + Efficiency
+            , Beta_RMSE = ifelse(Estimate=="beta", rmse_bias(popP = popPs[["Estimate"]], estP = value), NA)
+            , Beta_Efficiency = ifelse(Estimate=="beta", raw_eff(estP = value), NA)
+            ) %>% distinct()
+```
+
+
+#### Plot
+```{r}
+s32_imp_outcomes %>% pivot_longer(cols = contains("_"), names_to = c("Beta", "Outcome"), names_sep = "_", values_to = "value") %>% drop_na() %>%
+  
+  ggplot(aes(y=value, x=as.numeric(PercentMiss), color=as.numeric(PercentMiss))) + 
+      geom_point(show.legend = F) +
+      facet_wrap(~Beta+Outcome, scales = "free") +
+      labs(title="Scenario Set 3.2: NIHTB Processing Speed Outcomes"
+         , subtitle = "Multiple Imputation, nMissing=p_list, nPreds=1"
+         , x="Percent Missing"
+         , y="Outcome Value"
+         , color="Percent Missing")
+```
+
+
+
+
+
+
+
+# Done
